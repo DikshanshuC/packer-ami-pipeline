@@ -4,6 +4,7 @@ pipeline {
     environment {
         // Ensure this matches the region where you see your AMI
         AWS_REGION = "ap-south-1"
+        AWS_ACCOUNT_ID = "248189928204"
     }
 
     stages {
