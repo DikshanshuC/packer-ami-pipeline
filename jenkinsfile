@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         AWS_REGION = "ap-south-1"
-        AWS_CREDENTIALS = credentials('aws-credentials')  // Ensure AWS credentials are added in Jenkins
+        AWS_CREDENTIALS = credentials('aws-credentials')
     }
 
     stages {
@@ -13,20 +13,26 @@ pipeline {
             }
         }
 
-        stage('Install Packer') {
+        stage('Install Packer if Not Present') {
             steps {
-                sh '''
-                if ! command -v packer &> /dev/null
-                then
-                    echo "Packer not found! Installing..."
-                    curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg > /dev/null
-                    echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
-                    sudo apt update && sudo apt install -y packer
-                    packer --version
-                else
-                    echo "Packer is already installed"
-                fi
-                '''
+                script {
+                    sh '''
+                    if ! command -v packer &> /dev/null
+                    then
+                      echo "Packer not found! Installing..."
+                      # Because we have passwordless sudo, this won't prompt for a password
+                      sudo apt-get update -y
+                      sudo apt-get install -y curl gnupg software-properties-common
+                      curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
+                      sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
+                      sudo apt-get update -y
+                      sudo apt-get install -y packer
+                      packer --version
+                    else
+                      echo "Packer is already installed at $(which packer)"
+                    fi
+                    '''
+                }
             }
         }
 
@@ -38,10 +44,10 @@ pipeline {
 
         stage('Build AMI with Packer') {
             steps {
-                sh '''
-                packer init .
-                packer build -var "aws_region=${AWS_REGION}" packer.pkr.hcl
-                '''
+                sh """
+                  packer init .
+                  packer build -var 'aws_region=${AWS_REGION}' packer.pkr.hcl
+                """
             }
         }
 
@@ -52,3 +58,4 @@ pipeline {
         }
     }
 }
+
