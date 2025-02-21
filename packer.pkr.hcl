@@ -16,7 +16,7 @@ variable "ami_name" {
 }
 
 variable "instance_type" {
-  default = "t2.micro"
+  default = "t2.small"
 }
 
 source "amazon-ebs" "ubuntu" {
