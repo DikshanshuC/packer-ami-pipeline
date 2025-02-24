@@ -1,38 +1,100 @@
-pipeline {
+section packer {
+  required_plugins {
+    amazon = {
+      source  = "github.com/hashicorp/amazon"
+      version = ">= 1.0.0"
+    }
+  }
+}
+
+variable "aws_region" {
+  default = "ap-south-1"
+}
+
+variable "ami_name" {
+  default = "ubuntu-golden-image"
+}
+
+variable "instance_type" {
+  default = "t2.micro"
+}
+
+source "amazon-ebs" "ubuntu" {
+  region             = var.aws_region
+  source_ami_filter {
+    filters = {
+      virtualization-type = "hvm"
+      name                = "ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*"
+      root-device-type    = "ebs"
+    }
+    owners      = ["099720109477"] 
+    most_recent = true
+  }
+  instance_type      = var.instance_type
+  ssh_username       = "ubuntu"
+  ami_name           = var.ami_name
+}
+
+build {
+  sources = ["source.amazon-ebs.ubuntu"]
+
+  provisioner "shell" {
+    inline = [
+      "sudo apt update && sudo apt upgrade -y",
+      "sudo apt install -y openjdk-17-jdk openjdk-11-jdk openjdk-21-jdk",
+      "sudo apt install -y curl unzip ca-certificates htop",
+      
+      "sudo wget -O /usr/share/keyrings/jenkins-keyring.asc https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key",
+      "echo 'deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/' | sudo tee /etc/apt/sources.list.d/jenkins.list > /dev/null",
+      "sudo apt-get update",
+      "sudo apt-get install -y jenkins",
+      "jenkins --version",
+      
+      "sudo apt install -y docker.io",
+      "sudo systemctl enable docker",
+      "sudo systemctl start docker",
+      "docker --version",
+      
+      "curl \"https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip\" -o \"awscliv2.zip\"",
+      "unzip awscliv2.zip",
+      "sudo ./aws/install",
+      "aws --version",
+      
+      "sudo usermod -aG docker jenkins",
+      "sudo cat /var/lib/jenkins/secrets/initialAdminPassword"
+    ]
+  }
+} this is my .hcl file and pipeline {
     agent any
 
     environment {
-        // Update this region if needed
+        // Ensure this matches the region where you see your AMI
         AWS_REGION = "ap-south-1"
-
-        // Optionally, store your AWS credential in Jenkins with ID 'aws-credentials'
-        // and load them via a withCredentials() block if needed.
-        // For example:
-        // AWS_CREDENTIALS = credentials('aws-credentials')
     }
 
     stages {
         stage('Checkout Code') {
             steps {
+                // Pull your code from GitHub (main branch)
                 git branch: 'main', url: 'https://github.com/DikshanshuC/packer-ami-pipeline.git'
             }
         }
 
         stage('Install Dependencies') {
             steps {
-                // Requires passwordless sudo if Jenkins user doesn't have it yet
+                // Requires passwordless sudo for Jenkins user, or else this will fail
                 sh '''
-                    echo "Installing Dependencies..."
+                    echo "Installing dependencies..."
                     sudo apt-get update -y
                     sudo apt-get install -y unzip curl
 
-                    # Install / Update AWS CLI
+                    # Install/Update AWS CLI
                     curl -LO "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
                     unzip -o awscli-exe-linux-x86_64.zip
                     sudo ./aws/install --update
 
-                    # Install / Update Packer
-                    curl -LO https://releases.hashicorp.com/packer/1.8.2/packer_1.8.2_linux_amd64.zip
+                    # Install/Update Packer
+                    curl -LO "https://releases.hashicorp.com/packer/1.8.2/packer_1.8.2_linux_amd64.zip"
                     unzip -o packer_1.8.2_linux_amd64.zip
                     sudo mv packer /usr/local/bin/packer
                     packer --version
@@ -43,10 +105,9 @@ pipeline {
         stage('Validate AWS Credentials') {
             steps {
                 script {
-                    // If you have stored credentials in Jenkins, you can wrap this in withCredentials()
-                    // For example:
+                    // If you have AWS credentials in Jenkins, you can wrap this in a withCredentials() block
                     // withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
-                    //     ...
+                    //     sh 'aws sts get-caller-identity'
                     // }
 
                     def awsIdentity = sh(script: 'aws sts get-caller-identity', returnStdout: true).trim()
@@ -61,18 +122,18 @@ pipeline {
         stage('Build AMI with Packer') {
             steps {
                 script {
-                    // Ensure packer.pkr.hcl is present
+                    // Ensure the file is present
                     sh '''
                         ls -l packer.pkr.hcl || {
-                          echo "packer.pkr.hcl not found!";
-                          exit 1;
+                            echo "packer.pkr.hcl not found!";
+                            exit 1;
                         }
                     '''
 
                     // Initialize Packer plugins
                     sh 'packer init packer.pkr.hcl'
 
-                    // Run Packer build with logging, capture output
+                    // Build the AMI, capture output
                     sh '''
                         PACKER_LOG=1 PACKER_LOG_PATH=packer_debug.log \
                         packer build -machine-readable \
@@ -80,9 +141,12 @@ pipeline {
                         packer.pkr.hcl | tee output.log
                     '''
 
-                    // Parse the generated AMI ID from Packer output
+                    // Read the output file
                     def packerOutput = readFile('output.log')
-                    def amiIdMatch = packerOutput.find(/ami-\\w{8,17}/)
+
+                    // Use a more flexible regex to capture the AMI ID
+                    // This looks for "ami-" followed by alphanumeric chars
+                    def amiIdMatch = packerOutput.find(/ami-[0-9A-Za-z]+/)
 
                     if (amiIdMatch) {
                         env.NEW_AMI_ID = amiIdMatch
@@ -126,7 +190,7 @@ pipeline {
                             echo "No snapshot found or 'None' returned."
                         }
                     } else {
-                        echo "No previous AMI found named 'ubuntu-golden-image'. Skipping deregistration."
+                        echo "No previous AMI named 'ubuntu-golden-image' found. Skipping deregistration."
                     }
                 }
             }
