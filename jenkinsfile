@@ -2,8 +2,13 @@ pipeline {
     agent any
 
     environment {
+        // Update this region if needed
         AWS_REGION = "ap-south-1"
-        AWS_ACCOUNT_ID = "248189928204"
+
+        // Optionally, store your AWS credential in Jenkins with ID 'aws-credentials'
+        // and load them via a withCredentials() block if needed.
+        // For example:
+        // AWS_CREDENTIALS = credentials('aws-credentials')
     }
 
     stages {
@@ -15,17 +20,20 @@ pipeline {
 
         stage('Install Dependencies') {
             steps {
+                // Requires passwordless sudo if Jenkins user doesn't have it yet
                 sh '''
-                    echo "Installing dependencies..."
+                    echo "Installing Dependencies..."
                     sudo apt-get update -y
                     sudo apt-get install -y unzip curl
-                    
+
+                    # Install / Update AWS CLI
                     curl -LO "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
                     unzip -o awscli-exe-linux-x86_64.zip
                     sudo ./aws/install --update
 
-                    curl -LO "https://releases.hashicorp.com/packer/1.9.2/packer_1.9.2_linux_amd64.zip"
-                    unzip -o packer_1.9.2_linux_amd64.zip
+                    # Install / Update Packer
+                    curl -LO https://releases.hashicorp.com/packer/1.8.2/packer_1.8.2_linux_amd64.zip
+                    unzip -o packer_1.8.2_linux_amd64.zip
                     sudo mv packer /usr/local/bin/packer
                     packer --version
                 '''
@@ -35,6 +43,12 @@ pipeline {
         stage('Validate AWS Credentials') {
             steps {
                 script {
+                    // If you have stored credentials in Jenkins, you can wrap this in withCredentials()
+                    // For example:
+                    // withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
+                    //     ...
+                    // }
+
                     def awsIdentity = sh(script: 'aws sts get-caller-identity', returnStdout: true).trim()
                     if (!awsIdentity) {
                         error "AWS credentials not configured properly!"
@@ -47,15 +61,18 @@ pipeline {
         stage('Build AMI with Packer') {
             steps {
                 script {
+                    // Ensure packer.pkr.hcl is present
                     sh '''
-                        if [ ! -f packer.pkr.hcl ]; then
-                            echo "Error: packer.pkr.hcl not found!";
-                            exit 1;
-                        fi
+                        ls -l packer.pkr.hcl || {
+                          echo "packer.pkr.hcl not found!";
+                          exit 1;
+                        }
                     '''
 
+                    // Initialize Packer plugins
                     sh 'packer init packer.pkr.hcl'
 
+                    // Run Packer build with logging, capture output
                     sh '''
                         PACKER_LOG=1 PACKER_LOG_PATH=packer_debug.log \
                         packer build -machine-readable \
@@ -63,14 +80,15 @@ pipeline {
                         packer.pkr.hcl | tee output.log
                     '''
 
+                    // Parse the generated AMI ID from Packer output
                     def packerOutput = readFile('output.log')
-                    def amiIdMatch = packerOutput.find(/ami-[0-9A-Za-z]+/)
+                    def amiIdMatch = packerOutput.find(/ami-\\w{8,17}/)
 
                     if (amiIdMatch) {
                         env.NEW_AMI_ID = amiIdMatch
                         echo "New AMI ID: ${env.NEW_AMI_ID}"
                     } else {
-                        error "AMI ID not found in Packer output! Check packer_debug.log"
+                        error "AMI ID not found in Packer output!"
                     }
                 }
             }
@@ -79,27 +97,36 @@ pipeline {
         stage('Find and Deregister Old AMI') {
             steps {
                 script {
+                    echo "Searching for old AMI named 'ubuntu-golden-image'..."
+
                     def oldAmiId = sh(script: '''
-                        aws ec2 describe-images --owners self \
-                        --filters "Name=name,Values=ubuntu-golden-image" \
-                        --query "Images | sort_by(@, &CreationDate)[0].ImageId" \
-                        --output text
+                        aws ec2 describe-images \
+                            --owners self \
+                            --filters "Name=name,Values=ubuntu-golden-image" \
+                            --query "Images | sort_by(@, &CreationDate)[0].ImageId" \
+                            --output text
                     ''', returnStdout: true).trim()
 
                     if (oldAmiId && oldAmiId != "None") {
                         echo "Old AMI ID: ${oldAmiId}"
                         sh "aws ec2 deregister-image --image-id ${oldAmiId}"
-                        
-                        def snapshotId = sh(script: '''
-                            aws ec2 describe-images --image-ids ${oldAmiId} \
-                            --query "Images[0].BlockDeviceMappings[0].Ebs.SnapshotId" \
-                            --output text
-                        ''', returnStdout: true).trim()
+
+                        // Delete the snapshot associated with the old AMI
+                        def snapshotId = sh(script: """
+                            aws ec2 describe-images \
+                                --image-ids ${oldAmiId} \
+                                --query "Images[0].BlockDeviceMappings[0].Ebs.SnapshotId" \
+                                --output text
+                        """, returnStdout: true).trim()
 
                         if (snapshotId && snapshotId != "None") {
                             echo "Deleting Snapshot: ${snapshotId}"
                             sh "aws ec2 delete-snapshot --snapshot-id ${snapshotId}"
+                        } else {
+                            echo "No snapshot found or 'None' returned."
                         }
+                    } else {
+                        echo "No previous AMI found named 'ubuntu-golden-image'. Skipping deregistration."
                     }
                 }
             }
@@ -111,7 +138,8 @@ pipeline {
             echo "✅ AMI creation and cleanup completed successfully!"
         }
         failure {
-            echo "❌ Pipeline failed! Check packer_debug.log and output.log for details."
+            echo "❌ Pipeline failed! Check logs for details."
         }
     }
 }
+
